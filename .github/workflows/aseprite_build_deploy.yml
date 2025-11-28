@@ -2,10 +2,10 @@ name: Build and deploy Aseprite
 
 on:
   schedule:
-    - cron: '0 0 * * *' # 每日UTC时间0点触发[citation:2]
+    - cron: '0 0 * * *'
   push:
     branches: [ 'master' ]
-  workflow_dispatch: # 允许手动触发工作流[citation:2][citation:10]
+  workflow_dispatch:
 
 env:
   BUILD_TYPE: Release
@@ -17,7 +17,7 @@ jobs:
     outputs:
       download_url: ${{ steps.version_info.outputs.download_url }}
       latest_tag: ${{ steps.version_info.outputs.latest_tag }}
-      should_build: ${{ steps.version_check.outputs.should_build }}
+      should_build: ${{ steps.should_build.outputs.should_build }}
       upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
       - name: Get latest version info
@@ -25,41 +25,32 @@ jobs:
         run: |
           data=$(curl -sL https://api.github.com/repos/aseprite/aseprite/releases/latest)
           LATEST_TAG=$(echo "${data}" | jq -r '.tag_name')
-          DOWNLOAD_URL=$(echo "${data}" | jq -r '.assets[].browser_download_url')
+          DOWNLOAD_URL=$(echo "${data}" | jq -r '.assets[].browser_download_url | select(contains("source"))')
           VERSION_INFO=$(echo "${data}" | jq -r '.body')
           
-          # 使用新的环境文件格式替代已弃用的::set-output命令[citation:5]
           echo "latest_tag=$LATEST_TAG" >> $GITHUB_OUTPUT
           echo "download_url=$DOWNLOAD_URL" >> $GITHUB_OUTPUT
           echo "version_info<<EOF" >> $GITHUB_OUTPUT
           echo "$VERSION_INFO" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Check against cached version
-        id: version_check
+      - name: Check if should build
+        id: should_build
         run: |
-          # 简化版本检查逻辑：比较最新版本与缓存内容
-          if [[ -f "${{ steps.version_info.outputs.latest_tag }}.txt" ]]; then
-            echo "Cache exists, no need to build"
-            echo "should_build=false" >> $GITHUB_OUTPUT
-          else
-            echo "New version detected, should build"
-            echo "should_build=true" >> $GITHUB_OUTPUT
-            # 缓存新版本信息
-            echo "${{ steps.version_info.outputs.latest_tag }}" > "${{ steps.version_info.outputs.latest_tag }}.txt"
-          fi
+          # 简化版本检查逻辑
+          echo "Building new version: ${{ steps.version_info.outputs.latest_tag }}"
+          echo "should_build=true" >> $GITHUB_OUTPUT
 
       - name: Create Release
         id: create_release
-        #if: steps.version_check.outputs.should_build == 'true'
-        uses: actions/create-release@v1 # 注意：此Action有更新的版本，可考虑升级
+        if: steps.should_build.outputs.should_build == 'true'
+        uses: softprops/action-gh-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ steps.version_info.outputs.latest_tag }}
-          release_name: Release Aseprite ${{ steps.version_info.outputs.latest_tag }}
-          body: |
-            ${{ steps.version_info.outputs.version_info }}
+          name: Aseprite ${{ steps.version_info.outputs.latest_tag }}
+          body: ${{ steps.version_info.outputs.version_info }}
           draft: true
           prerelease: false
 
@@ -70,85 +61,128 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [windows-latest]
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        include:
+          - os: windows-latest
+            shell: cmd
+          - os: ubuntu-latest  
+            shell: bash
+          - os: macos-latest
+            shell: bash
       fail-fast: false
+    
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4 # 使用最新稳定版[citation:5]
+        uses: actions/checkout@v4
 
       - name: Cache Skia dependencies
         id: cache-skia
         uses: actions/cache@v4
         with:
           path: skia
-          key: skia-${{ matrix.os }}-${{ hashFiles('**/skia-version.txt') }} # 更精确的缓存键[citation:1]
-          restore-keys: |
-            skia-${{ matrix.os }}-
+          key: skia-${{ matrix.os }}-m81-b607b32047
 
       - name: Download Skia
         if: steps.cache-skia.outputs.cache-hit != 'true'
         run: |
-          curl -o Skia-${{ runner.os }}-Release-X64.zip -L https://github.com/aseprite/skia/releases/download/m81-b607b32047/Skia-${{ runner.os }}-Release-X64.zip
-          unzip Skia-${{ runner.os }}-Release-X64.zip -d skia
+          curl -o skia.zip -L "https://github.com/aseprite/skia/releases/download/m81-b607b32047/Skia-${{ matrix.os == 'macos-latest' && 'mac' || matrix.os == 'windows-latest' && 'win' || 'linux' }}-Release-x64.zip"
+          unzip skia.zip -d skia
 
       - name: Download Aseprite source
         run: |
-          curl -o Aseprite-source.zip -L ${{ needs.check-version.outputs.download_url }}
-          unzip Aseprite-source.zip -d aseprite
+          curl -o aseprite-source.zip -L "${{ needs.check-version.outputs.download_url }}"
+          unzip aseprite-source.zip -d aseprite
           mkdir -p aseprite/build
 
-      - name: Install system dependencies
-        run: |
-          # 使用更清晰的多平台依赖安装步骤
-          if [ "${{ matrix.os }}" == "ubuntu-latest" ]; then
-            sudo apt update
-            sudo apt install -y cmake ninja-build libxcursor-dev libxi-dev libgl1-mesa-dev
-          elif [ "${{ matrix.os }}" == "macos-latest" ]; then
-            brew install ninja p7zip
-          elif [ "${{ matrix.os }}" == "windows-latest" ]; then
-            # 使用更新的Visual Studio设置动作
-            choco install ninja
-          fi
-
-      - name: Setup Windows Build Environment
+      - name: Install dependencies (Windows)
         if: matrix.os == 'windows-latest'
-        uses: ilammy/msvc-dev-cmd@v1 # 更现代的MSVC环境设置
+        uses: seanmiddleditch/gha-setup-ninja@v3
 
-      - name: Configure with CMake
+      - name: Install dependencies (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build libxcursor-dev libxi-dev libgl1-mesa-dev libfontconfig1-dev
+
+      - name: Install dependencies (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew update
+          brew install ninja p7zip
+
+      - name: Setup MSVC (Windows)
+        if: matrix.os == 'windows-latest'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure CMake
         working-directory: aseprite/build
         run: |
-          # 统一CMake配置，移除内联shell声明
-          cmake -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
-                -DLAF_BACKEND=skia \
-                -DSKIA_DIR=../../skia \
-                -DSKIA_LIBRARY_DIR=../../skia/out/Release-x64 \
-                -G Ninja ..
+          # Windows specific CMake configuration
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            cmake -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} ^
+                  -DLAF_BACKEND=skia ^
+                  -DSKIA_DIR=../../skia ^
+                  -DSKIA_LIBRARY_DIR=../../skia/out/Release-x64 ^
+                  -G Ninja ..
+          # Linux specific CMake configuration  
+          elif [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            cmake -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+                  -DLAF_BACKEND=skia \
+                  -DSKIA_DIR=../../skia \
+                  -DSKIA_LIBRARY_DIR=../../skia/out/Release-x64 \
+                  -G Ninja ..
+          # macOS specific CMake configuration
+          else
+            cmake -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+                  -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+                  -DCMAKE_OSX_DEPLOYMENT_TARGET=10.9 \
+                  -DLAF_BACKEND=skia \
+                  -DSKIA_DIR=../../skia \
+                  -DSKIA_LIBRARY_DIR=../../skia/out/Release-x64 \
+                  -G Ninja ..
+          fi
+        shell: ${{ matrix.shell }}
 
       - name: Build with Ninja
         working-directory: aseprite/build
         run: ninja aseprite
 
-      - name: Prepare distribution
+      - name: Clean build artifacts
         working-directory: aseprite/build/bin
         run: |
-          # 清理构建文件
-          rm -f gen modp_b64_gen gen.exe gen.exe.manifest modp_b64_gen.exe modp_b64_gen.exe.manifest
-          # 为Windows创建便携版配置
-          if [ "${{ matrix.os }}" == "windows-latest" ]; then
-            echo '# This file is here so Aseprite behaves as a portable program' > aseprite.ini
-          fi
+          # Remove unnecessary build artifacts
+          find . -name "gen*" -delete
+          find . -name "modp_b64_gen*" -delete
+        shell: bash
+
+      - name: Create portable config (Windows)
+        if: matrix.os == 'windows-latest'
+        working-directory: aseprite/build/bin
+        run: |
+          echo # This file is here so Aseprite behaves as a portable program > aseprite.ini
+
+      - name: Install 7zip (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get install -y p7zip-full
 
       - name: Package artifact
         working-directory: aseprite/build/bin
         run: |
-          7z -tzip a Aseprite-${{ needs.check-version.outputs.latest_tag }}-${{ runner.os }}.zip *
+          # Determine platform name for the zip file
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            PLATFORM="Windows"
+            7z a -tzip "Aseprite-${{ needs.check-version.outputs.latest_tag }}-$PLATFORM.zip" *
+          elif [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+            PLATFORM="Linux"
+            7z a -tzip "Aseprite-${{ needs.check-version.outputs.latest_tag }}-$PLATFORM.zip" *
+          else
+            PLATFORM="macOS"
+            7z a -tzip "Aseprite-${{ needs.check-version.outputs.latest_tag }}-$PLATFORM.zip" *
+          fi
+        shell: bash
 
       - name: Upload release asset
-        uses: actions/upload-release-asset@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: softprops/action-gh-release@v1
         with:
-          upload_url: ${{ needs.check-version.outputs.upload_url }}
-          asset_path: aseprite/build/bin/Aseprite-${{ needs.check-version.outputs.latest_tag }}-${{ runner.os }}.zip
-          asset_name: Aseprite-${{ needs.check-version.outputs.latest_tag }}-${{ runner.os }}.zip
-          asset_content_type: application/zip
+          files: aseprite/build/bin/Aseprite-${{ needs.check-version.outputs.latest_tag }}-*.zip
+          draft: false
