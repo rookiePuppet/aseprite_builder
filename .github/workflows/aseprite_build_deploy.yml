@@ -17,9 +17,8 @@ jobs:
     outputs:
       download_url: ${{ steps.version_info.outputs.download_url }}
       latest_tag: ${{ steps.version_info.outputs.latest_tag }}
-      should_build: ${{ steps.should_build.outputs.should_build }}
-      upload_url: ${{ steps.create_release.outputs.upload_url }}
       should_build: ${{ steps.version_check.outputs.should_build }}
+      upload_url: ${{ steps.create_release.outputs.upload_url }}
     steps:
       - name: Get latest version info
         id: version_info
