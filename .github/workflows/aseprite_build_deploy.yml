@@ -19,6 +19,7 @@ jobs:
       latest_tag: ${{ steps.version_info.outputs.latest_tag }}
       should_build: ${{ steps.should_build.outputs.should_build }}
       upload_url: ${{ steps.create_release.outputs.upload_url }}
+      should_build: ${{ steps.version_check.outputs.should_build }}
     steps:
       - name: Get latest version info
         id: version_info
@@ -51,7 +52,7 @@ jobs:
 
       - name: Create Release
         id: create_release
-        if: steps.version_check.outputs.should_build == 'true'
+        #if: steps.version_check.outputs.should_build == 'true'
         uses: actions/create-release@v1 # 注意：此Action有更新的版本，可考虑升级
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
